@@ -1,14 +1,14 @@
 use std::iter;
 
 use winit::{
+    application::ApplicationHandler,
     event::*,
     event_loop::EventLoop,
     keyboard::{KeyCode, PhysicalKey},
-    window::{Window, WindowAttributes},
+    window::Window,
 };
 
-#[cfg(target_arch = "wasm32")]
-use wasm_bindgen::prelude::*;
+static mut GLOBAL_WINDOW: Option<Window> = None;
 
 struct State<'a> {
     surface: wgpu::Surface<'a>,
@@ -16,10 +16,6 @@ struct State<'a> {
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
     size: winit::dpi::PhysicalSize<u32>,
-    // The window must be declared after the surface so
-    // it gets dropped after it as the surface contains
-    // unsafe references to the window's resources.
-    window: &'a Window,
     render_pipeline: wgpu::RenderPipeline,
 }
 
@@ -30,10 +26,8 @@ impl<'a> State<'a> {
         // The instance is a handle to our GPU
         // BackendBit::PRIMARY => Vulkan + Metal + DX12 + Browser WebGPU
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            #[cfg(not(target_arch = "wasm32"))]
             backends: wgpu::Backends::PRIMARY,
-            #[cfg(target_arch = "wasm32")]
-            backends: wgpu::Backends::GL,
+
             ..Default::default()
         });
 
@@ -55,11 +49,7 @@ impl<'a> State<'a> {
                     required_features: wgpu::Features::empty(),
                     // WebGL doesn't support all of wgpu's features, so if
                     // we're building for the web we'll have to disable some.
-                    required_limits: if cfg!(target_arch = "wasm32") {
-                        wgpu::Limits::downlevel_webgl2_defaults()
-                    } else {
-                        wgpu::Limits::default()
-                    },
+                    required_limits: wgpu::Limits::default(),
                 },
                 // Some(&std::path::Path::new("trace")), // Trace path
                 None,
@@ -146,13 +136,9 @@ impl<'a> State<'a> {
             queue,
             config,
             size,
-            window,
+
             render_pipeline,
         }
-    }
-
-    fn window(&self) -> &Window {
-        &self.window
     }
 
     pub fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
@@ -164,7 +150,7 @@ impl<'a> State<'a> {
         }
     }
 
-    #[allow(unused_variables)]
+    #[allow(unused)]
     fn input(&mut self, event: &WindowEvent) -> bool {
         false
     }
@@ -215,107 +201,99 @@ impl<'a> State<'a> {
     }
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen(start))]
-pub async fn run() {
-    cfg_if::cfg_if! {
-        if #[cfg(target_arch = "wasm32")] {
-            std::panic::set_hook(Box::new(console_error_panic_hook::hook));
-            console_log::init_with_level(log::Level::Info).expect("Couldn't initialize logger");
-        } else {
-            env_logger::init();
+#[derive(Default)]
+struct App<'a> {
+    state: Option<State<'a>>,
+    window: Option<&'a Window>,
+}
+
+impl<'a> ApplicationHandler for App<'a> {
+    fn resumed(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
+        if self.window.is_none() {
+            unsafe {
+                GLOBAL_WINDOW = Some(
+                    event_loop
+                        .create_window(Window::default_attributes())
+                        .unwrap(),
+                );
+
+                self.window = GLOBAL_WINDOW.as_ref();
+
+                self.state = Some(pollster::block_on(State::new(
+                    self.window.as_ref().unwrap(),
+                )));
+            }
         }
     }
 
-    let event_loop = EventLoop::new().unwrap();
-    let window_attr = WindowAttributes::default();
-    let window = EventLoop::create_window(&event_loop, window_attr).unwrap();
+    fn window_event(
+        &mut self,
+        event_loop: &winit::event_loop::ActiveEventLoop,
+        _window_id: winit::window::WindowId,
+        event: WindowEvent,
+    ) {
+        match event {
+            WindowEvent::CloseRequested
+            | WindowEvent::KeyboardInput {
+                event:
+                    KeyEvent {
+                        state: ElementState::Pressed,
+                        physical_key: PhysicalKey::Code(KeyCode::Escape),
+                        ..
+                    },
+                ..
+            } => {
+                println!("The close button was pressed; stopping");
+                event_loop.exit();
+            }
+            WindowEvent::Resized(physical_size) => {
+                self.state.as_mut().unwrap().resize(physical_size);
+            }
+            WindowEvent::RedrawRequested => {
+                // Redraw the application.
+                //
+                // It's preferable for applications that do not render continuously to render in
+                // this event rather than in AboutToWait, since rendering in here allows
+                // the program to gracefully handle redraws requested by the OS.
 
-    #[cfg(target_arch = "wasm32")]
-    {
-        // Winit prevents sizing with CSS, so we have to set
-        // the size manually when on web.
-        use winit::dpi::PhysicalSize;
+                // Draw.
 
-        use winit::platform::web::WindowExtWebSys;
-        web_sys::window()
-            .and_then(|win| win.document())
-            .and_then(|doc| {
-                let dst = doc.get_element_by_id("wasm-example")?;
-                let canvas = web_sys::Element::from(window.canvas()?);
-                dst.append_child(&canvas).ok()?;
-                Some(())
-            })
-            .expect("Couldn't append canvas to document body.");
+                // Queue a RedrawRequested event.
+                //
+                // You only need to call this if you've determined that you need to redraw in
+                // applications which do not always need to. Applications that redraw continuously
+                // can render here instead.
+                self.window.as_ref().unwrap().request_redraw();
 
-        let _ = window.request_inner_size(PhysicalSize::new(450, 400));
-    }
+                self.state.as_mut().unwrap().update();
+                match self.state.as_mut().unwrap().render() {
+                    Ok(_) => {}
+                    // Reconfigure the surface if it's lost or outdated
+                    Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
+                        let size = self.state.as_ref().unwrap().size;
+                        self.state.as_mut().unwrap().resize(size)
+                    }
+                    // The system is out of memory, we should probably quit
+                    Err(wgpu::SurfaceError::OutOfMemory) => {
+                        log::error!("OutOfMemory");
+                        event_loop.exit();
+                    }
 
-    // State::new uses async code, so we're going to wait for it to finish
-    let mut state = State::new(&window).await;
-    let mut surface_configured = false;
-
-    event_loop
-        .run(move |event, control_flow| {
-            match event {
-                Event::WindowEvent {
-                    ref event,
-                    window_id,
-                } if window_id == state.window().id() => {
-                    if !state.input(event) {
-                        // UPDATED!
-                        match event {
-                            WindowEvent::CloseRequested
-                            | WindowEvent::KeyboardInput {
-                                event:
-                                    KeyEvent {
-                                        state: ElementState::Pressed,
-                                        physical_key: PhysicalKey::Code(KeyCode::Escape),
-                                        ..
-                                    },
-                                ..
-                            } => control_flow.exit(),
-                            WindowEvent::Resized(physical_size) => {
-                                log::info!("physical_size: {physical_size:?}");
-                                surface_configured = true;
-                                state.resize(*physical_size);
-                            }
-                            WindowEvent::RedrawRequested => {
-                                // This tells winit that we want another frame after this one
-                                state.window().request_redraw();
-
-                                if !surface_configured {
-                                    return;
-                                }
-
-                                state.update();
-                                match state.render() {
-                                    Ok(_) => {}
-                                    // Reconfigure the surface if it's lost or outdated
-                                    Err(
-                                        wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated,
-                                    ) => state.resize(state.size),
-                                    // The system is out of memory, we should probably quit
-                                    Err(wgpu::SurfaceError::OutOfMemory) => {
-                                        log::error!("OutOfMemory");
-                                        control_flow.exit();
-                                    }
-
-                                    // This happens when the a frame takes too long to present
-                                    Err(wgpu::SurfaceError::Timeout) => {
-                                        log::warn!("Surface timeout")
-                                    }
-                                }
-                            }
-                            _ => {}
-                        }
+                    // This happens when the a frame takes too long to present
+                    Err(wgpu::SurfaceError::Timeout) => {
+                        log::warn!("Surface timeout")
                     }
                 }
-                _ => {}
             }
-        })
-        .unwrap();
+            _ => (),
+        }
+    }
 }
 
 fn main() {
-    pollster::block_on(run());
+    env_logger::init();
+
+    let mut app = App::default();
+    let event_loop = EventLoop::new().unwrap();
+    let _ = event_loop.run_app(&mut app);
 }
