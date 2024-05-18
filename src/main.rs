@@ -4,7 +4,7 @@ use winit::{
     event::*,
     event_loop::EventLoop,
     keyboard::{KeyCode, PhysicalKey},
-    window::{Window, WindowBuilder},
+    window::{Window, WindowAttributes},
 };
 
 #[cfg(target_arch = "wasm32")]
@@ -105,6 +105,7 @@ impl<'a> State<'a> {
                 module: &shader,
                 entry_point: "vs_main", // 1.
                 buffers: &[],           // 2.
+                compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {
                 // 3.
@@ -116,6 +117,7 @@ impl<'a> State<'a> {
                     blend: Some(wgpu::BlendState::REPLACE),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
+                compilation_options: Default::default(),
             }),
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList, // 1.
@@ -225,7 +227,8 @@ pub async fn run() {
     }
 
     let event_loop = EventLoop::new().unwrap();
-    let window = WindowBuilder::new().build(&event_loop).unwrap();
+    let window_attr = WindowAttributes::default();
+    let window = EventLoop::create_window(&event_loop, window_attr).unwrap();
 
     #[cfg(target_arch = "wasm32")]
     {
