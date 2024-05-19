@@ -1,4 +1,10 @@
+use wgpu::{
+    util::{BufferInitDescriptor, DeviceExt},
+    BufferUsages,
+};
 use winit::{event::WindowEvent, window::Window};
+
+use crate::{model, vertex::Vertex};
 
 pub struct State<'a> {
     pub window: &'a Window,
@@ -8,6 +14,9 @@ pub struct State<'a> {
     pub config: wgpu::SurfaceConfiguration,
     pub size: winit::dpi::PhysicalSize<u32>,
     pub render_pipeline: wgpu::RenderPipeline,
+    pub vertex_buffer: wgpu::Buffer,
+    pub indice_buffer: wgpu::Buffer,
+    pub indice_num: u32,
 }
 
 impl<'a> State<'a> {
@@ -45,6 +54,19 @@ impl<'a> State<'a> {
             .await
             .unwrap();
 
+        let vb_desc = BufferInitDescriptor {
+            label: Some("Vertex Buffer"),
+            contents: bytemuck::cast_slice(model::THREE_TRIANGLE_V),
+            usage: BufferUsages::VERTEX,
+        };
+        let vertex_buffer = device.create_buffer_init(&vb_desc);
+        let ib_desc = BufferInitDescriptor {
+            label: Some("Indice Buffer"),
+            contents: bytemuck::cast_slice(model::THREE_TRIANGLE_I),
+            usage: BufferUsages::INDEX,
+        };
+        let indice_buffer = device.create_buffer_init(&ib_desc);
+
         let surface_caps = surface.get_capabilities(&adapter);
         // Shader code in this tutorial assumes an Srgb surface texture. Using a different
         // one will result all the colors comming out darker. If you want to support non
@@ -76,13 +98,14 @@ impl<'a> State<'a> {
                 bind_group_layouts: &[],
                 push_constant_ranges: &[],
             });
+
         let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Render Pipeline"),
             layout: Some(&render_pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: "vs_main",
-                buffers: &[],
+                buffers: &[Vertex::desc()],
                 compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {
@@ -124,6 +147,9 @@ impl<'a> State<'a> {
             size,
             window,
             render_pipeline,
+            vertex_buffer,
+            indice_buffer,
+            indice_num: model::THREE_TRIANGLE_I.len() as u32,
         }
     }
 
@@ -177,7 +203,9 @@ impl<'a> State<'a> {
             });
 
             render_pass.set_pipeline(&self.render_pipeline);
-            render_pass.draw(0..3, 0..1);
+            render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+            render_pass.set_index_buffer(self.indice_buffer.slice(..), wgpu::IndexFormat::Uint16);
+            render_pass.draw_indexed(0..self.indice_num, 0, 0..1);
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
